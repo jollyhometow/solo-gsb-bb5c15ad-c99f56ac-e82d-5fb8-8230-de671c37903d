@@ -84,12 +84,20 @@ def monoisotopic_mass(parsed: ParsedFormula) -> float:
 
 
 def isotope_envelope(
-    parsed: ParsedFormula, tolerance: float, prune: float
+    parsed: ParsedFormula,
+    tolerance: float,
+    prune: float,
+    isotope_table: dict[str, tuple[tuple[float, float], ...]] = ISOTOPES,
 ) -> list[Peak]:
-    """Full (unnormalised) isotope envelope as sorted (mass, probability)."""
+    """Full (unnormalised) isotope envelope as sorted (mass, probability).
+
+    ``isotope_table`` defaults to the natural-abundance table; pass a
+    modified table (e.g. with an enriched isotope distribution for one
+    element) to override specific entries.
+    """
     envelope: list[Peak] = [(0.0, 1.0)]
     for symbol, count in parsed.composition.items():
-        base = list(ISOTOPES[symbol])
+        base = list(isotope_table[symbol])
         element_poly = _power_polynomial(base, count, tolerance, prune)
         envelope = convolve(envelope, element_poly, tolerance, prune)
     shift = label_mass_shift(parsed)

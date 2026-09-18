@@ -10,9 +10,15 @@ from pydantic import BaseModel, Field
 
 from . import __version__, db
 from .config import settings
+from .enrichment import (
+    PeakListError,
+    fit_enrichment,
+    normalise_base_peak,
+    validate_observed_peaks,
+)
 from .envelope import isotope_envelope, monoisotopic_mass, top_peaks
 from .isotopes import ISOTOPES
-from .parser import FormulaError, parse_formula
+from .parser import FormulaError, LabelError, parse_formula, parse_label
 
 
 @asynccontextmanager
@@ -30,7 +36,9 @@ app = FastAPI(
     description=(
         "Computes natural-abundance isotope envelopes (mass/intensity "
         "polynomial convolution) and monoisotopic masses for molecular "
-        "formulas, with optional pure-isotope labels such as [13C]."
+        "formulas, with optional pure-isotope labels such as [13C]; also "
+        "estimates single-isotope enrichment by fitting candidate "
+        "abundances against observed peaks."
     ),
     lifespan=lifespan,
 )
@@ -66,6 +74,57 @@ class EnvelopeResponse(BaseModel):
     cached: bool
 
 
+class ObservedPeak(BaseModel):
+    mass: float = Field(..., description="Observed peak mass (Da)")
+    intensity: float = Field(..., ge=0, description="Observed peak intensity")
+
+
+class EnrichmentFitRequest(BaseModel):
+    formula: str = Field(
+        ...,
+        description="Molecular formula, e.g. 'C6H12O6' or 'C6H6[13C]2'",
+        examples=["C6H12O6"],
+    )
+    label: str = Field(
+        ...,
+        description="Single isotope label to estimate, e.g. '13C'",
+        examples=["13C"],
+    )
+    peaks: list[ObservedPeak] = Field(
+        ...,
+        max_length=200,
+        description="Observed peaks, sorted by strictly increasing mass",
+    )
+    step_percent: float = Field(
+        1.0,
+        ge=0.5,
+        le=10.0,
+        description="Abundance grid step in percentage points (0.5-10)",
+    )
+    mass_tolerance: float = Field(
+        ...,
+        gt=0,
+        description="Mass tolerance (Da) for pairing observed/predicted peaks",
+    )
+
+
+class PeakPairOut(BaseModel):
+    observed_mass: float | None
+    observed_intensity: float | None
+    predicted_mass: float | None
+    predicted_intensity: float | None
+
+
+class EnrichmentFitResponse(BaseModel):
+    formula: str
+    label: str
+    best_abundance_percent: float
+    mse: float
+    search_points: int
+    pair_count: int
+    pairs: list[PeakPairOut]
+
+
 @app.exception_handler(FormulaError)
 async def formula_error_handler(request: Request, exc: FormulaError) -> JSONResponse:
     return JSONResponse(
@@ -75,6 +134,34 @@ async def formula_error_handler(request: Request, exc: FormulaError) -> JSONResp
                 "error": "invalid_formula",
                 "message": exc.message,
                 "position": exc.position,
+            }
+        },
+    )
+
+
+@app.exception_handler(LabelError)
+async def label_error_handler(request: Request, exc: LabelError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "error": "invalid_label",
+                "message": exc.message,
+                "position": exc.position,
+            }
+        },
+    )
+
+
+@app.exception_handler(PeakListError)
+async def peak_list_error_handler(request: Request, exc: PeakListError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "error": "invalid_peaks",
+                "message": exc.message,
+                "index": exc.index,
             }
         },
     )
@@ -125,3 +212,50 @@ def envelope(req: EnvelopeRequest) -> dict:
     db.put_cache(req.formula, req.top_n, {k: v for k, v in result.items() if k != "cached"})
     db.log_request(req.formula, req.top_n, ok=True, message="computed")
     return result
+
+
+@app.post("/api/v1/enrichment-fit", response_model=EnrichmentFitResponse)
+def enrichment_fit(req: EnrichmentFitRequest) -> dict:
+    """Estimate the abundance of a single isotope label by fitting the
+    computed envelope against observed peaks over a 0-100% grid."""
+    parsed = parse_formula(req.formula)
+    symbol, mass_number = parse_label(req.label)
+
+    observed = [(p.mass, p.intensity) for p in req.peaks]
+    validate_observed_peaks(observed)
+
+    fit = fit_enrichment(
+        parsed,
+        symbol,
+        mass_number,
+        observed,
+        step_percent=req.step_percent,
+        mass_tolerance=req.mass_tolerance,
+        merge_tolerance=settings.merge_tolerance,
+        prune=settings.prune_threshold,
+    )
+
+    obs = normalise_base_peak(observed)
+    pairs = [
+        {
+            "observed_mass": round(obs[i][0], 6) if i is not None else None,
+            "observed_intensity": round(obs[i][1], 6) if i is not None else None,
+            "predicted_mass": round(fit.predicted[j][0], 6) if j is not None else None,
+            "predicted_intensity": round(fit.predicted[j][1], 6) if j is not None else None,
+        }
+        for i, j in fit.pairs
+    ]
+    pairs.sort(
+        key=lambda p: p["observed_mass"]
+        if p["observed_mass"] is not None
+        else p["predicted_mass"]
+    )
+    return {
+        "formula": req.formula,
+        "label": req.label,
+        "best_abundance_percent": round(fit.best_abundance_percent, 6),
+        "mse": fit.mse,
+        "search_points": fit.search_points,
+        "pair_count": len(pairs),
+        "pairs": pairs,
+    }

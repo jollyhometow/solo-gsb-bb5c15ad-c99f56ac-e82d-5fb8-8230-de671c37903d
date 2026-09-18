@@ -41,10 +41,11 @@ def merge_peaks(peaks: list[Peak], tolerance: float) -> list[Peak]:
 
 def convolve(p1: list[Peak], p2: list[Peak], tolerance: float, prune: float) -> list[Peak]:
     """Convolve two peak lists (multiply the underlying polynomials)."""
-    out: list[Peak] = []
-    for m1, i1 in p1:
-        for m2, i2 in p2:
-            out.append((m1 + m2, i1 * i2))
+    out: list[Peak] = [
+        (m1 + m2, i1 * i2)
+        for m1, i1 in p1
+        for m2, i2 in p2
+    ]
     out = merge_peaks(out, tolerance)
     if prune > 0 and out:
         top = max(i for _, i in out)
@@ -52,7 +53,7 @@ def convolve(p1: list[Peak], p2: list[Peak], tolerance: float, prune: float) -> 
     return out
 
 
-def _power_polynomial(base: list[Peak], n: int, tolerance: float, prune: float) -> list[Peak]:
+def power_polynomial(base: list[Peak], n: int, tolerance: float, prune: float) -> list[Peak]:
     """Raise an element's isotope polynomial to the atom count (binary
     exponentiation keeps large counts cheap)."""
     result: list[Peak] = [(0.0, 1.0)]
@@ -90,7 +91,7 @@ def isotope_envelope(
     envelope: list[Peak] = [(0.0, 1.0)]
     for symbol, count in parsed.composition.items():
         base = list(ISOTOPES[symbol])
-        element_poly = _power_polynomial(base, count, tolerance, prune)
+        element_poly = power_polynomial(base, count, tolerance, prune)
         envelope = convolve(envelope, element_poly, tolerance, prune)
     shift = label_mass_shift(parsed)
     if shift:

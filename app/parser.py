@@ -34,6 +34,16 @@ class FormulaError(ValueError):
         self.position = position
 
 
+class LabelError(ValueError):
+    """Validation error for a bare isotope label, carrying the 0-based
+    character position within the label string."""
+
+    def __init__(self, message: str, position: int) -> None:
+        super().__init__(message)
+        self.message = message
+        self.position = position
+
+
 @dataclass
 class ParsedFormula:
     # natural-abundance element symbol -> atom count
@@ -125,3 +135,32 @@ def _parse_label(text: str, i: int, parsed: ParsedFormula) -> int:
     key = (symbol, mass_number)
     parsed.labels[key] = parsed.labels.get(key, 0) + count
     return next_i
+
+
+def parse_label(text: str) -> tuple[str, int]:
+    """Parse and validate a bare isotope label such as ``'13C'``.
+
+    Returns ``(element_symbol, mass_number)``. Raises :class:`LabelError`
+    with a 0-based ``position`` pointing at the offending token.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise LabelError("Label must be a non-empty string, e.g. '13C'", 0)
+    match = _LABEL_BODY_RE.fullmatch(text)
+    if not match:
+        raise LabelError(
+            f"Malformed label '{text}'; expected a mass number followed by "
+            f"an element symbol, e.g. '13C'",
+            0,
+        )
+    mass_number = int(match.group(1))
+    symbol = match.group(2)
+    symbol_pos = len(match.group(1))
+    if symbol not in ISOTOPES:
+        raise LabelError(f"Unknown element symbol '{symbol}' in label", symbol_pos)
+    if isotope_by_mass_number(symbol, mass_number) is None:
+        raise LabelError(
+            f"Element '{symbol}' has no known isotope with mass number "
+            f"{mass_number}; check the label mass",
+            0,
+        )
+    return symbol, mass_number
